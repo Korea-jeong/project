@@ -1,0 +1,113 @@
+<div style="font-size:16px;color:#1f2937;"><div style="background:linear-gradient(135deg,#4338ca,#4338cacc);color:#fff;border-radius:12px;padding:22px 24px;margin:0 0 24px;"><div style="font-size:0.85em;opacity:0.85;">SecurityMax Lab · 프로그래밍언어/Python</div><div style="font-size:1.4em;font-weight:700;margin-top:6px;line-height:1.4;">Python 보안 스크립트 ②: SSH 로그 파서로 공격 IP 집계와 &#x27;실패 후 성공&#x27; 탐지</div></div><p style="line-height:1.85;margin:0 0 14px;">리눅스 로그 분석 편에서 <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">grep | sort | uniq -c</code>로 공격 IP를 세어 봤습니다. 명령 한 줄로도 충분하지만, 매일 반복하거나 "실패가 몰린 뒤 같은 IP에서 로그인 성공" 같은 조건을 잡으려면 스크립트가 편합니다. 이번 글에서는 정규표현식으로 auth.log를 파싱해 보고서를 출력하는 Python 스크립트를 만듭니다.</p>
+<h2 style="border-left:6px solid #4338ca;padding:6px 12px;margin:34px 0 14px;color:#4338ca;font-size:1.35em;">1. 목표 정하기</h2>
+<p style="line-height:1.85;margin:0 0 14px;">스크립트가 할 일:</p>
+<ol style="line-height:1.85;margin:0 0 14px;padding-left:24px;"><li>로그 파일(일반 텍스트와 .gz 압축 모두)을 읽는다.</li><li>실패/성공 로그에서 시각, 계정, IP를 뽑는다.</li><li>IP별 실패 횟수와 많이 시도된 계정을 집계한다.</li><li><strong>실패가 N번 이상 있었던 IP에서 성공한 로그인</strong>을 경고한다.</li><li>결과를 화면과 CSV로 출력한다.</li></ol>
+<h2 style="border-left:6px solid #4338ca;padding:6px 12px;margin:34px 0 14px;color:#4338ca;font-size:1.35em;">2. 분석할 로그 형식</h2>
+<pre style="background:#111827;color:#e5e7eb;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:13.5px;line-height:1.6;"><code>Nov 27 02:10:01 web01 sshd[1201]: Failed password for invalid user test from 198.51.100.7 port 40022 ssh2
+Nov 27 02:10:03 web01 sshd[1201]: Failed password for root from 198.51.100.7 port 40030 ssh2
+Nov 27 09:15:44 web01 sshd[2210]: Accepted publickey for alice from 192.0.2.10 port 52100 ssh2</code></pre>
+<p style="line-height:1.85;margin:0 0 14px;">전통적인 syslog 형식 기준입니다. 최근 일부 배포판은 <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">2026-11-27T02:10:01.123456+09:00</code> 같은 ISO 형식 시각을 쓰므로, 아래 코드는 두 형식을 모두 받도록 만듭니다.</p>
+<h2 style="border-left:6px solid #4338ca;padding:6px 12px;margin:34px 0 14px;color:#4338ca;font-size:1.35em;">3. 정규표현식 만들기</h2>
+<pre style="background:#111827;color:#e5e7eb;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:13.5px;line-height:1.6;"><code>import re
+
+FAILED = re.compile(
+    r&quot;Failed password for (?:invalid user )?(?P&lt;user&gt;\S+) from (?P&lt;ip&gt;[\d.:a-fA-F]+)&quot;
+)
+ACCEPTED = re.compile(
+    r&quot;Accepted (?P&lt;method&gt;\S+) for (?P&lt;user&gt;\S+) from (?P&lt;ip&gt;[\d.:a-fA-F]+)&quot;
+)</code></pre>
+<table style="border-collapse:collapse;width:100%;margin:14px 0;font-size:0.95em;"><tr><th style="background:#4338ca;color:#fff;border:1px solid #d1d5db;padding:8px 10px;text-align:left;">패턴</th><th style="background:#4338ca;color:#fff;border:1px solid #d1d5db;padding:8px 10px;text-align:left;">의미</th></tr><tr><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;"><code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">(?:invalid user )?</code></td><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">"invalid user "가 있어도 되고 없어도 됨(캡처 안 함)</td></tr><tr><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;"><code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">(?P&lt;user&gt;\S+)</code></td><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">공백 아닌 문자열을 user라는 이름으로 저장</td></tr><tr><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;"><code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">[\d.:a-fA-F]+</code></td><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">IPv4와 IPv6 주소 문자</td></tr></table>
+<div style="background:#4338ca0f;border-left:4px solid #4338ca;border-radius:6px;padding:12px 16px;margin:16px 0;line-height:1.8;">💡 정규표현식은 regex101.com 같은 사이트에서 예시 로그를 붙여 넣고 테스트하면 이해가 빠릅니다(실제 서버 로그는 IP 등 민감 정보를 지우고 넣으세요).</div>
+<h2 style="border-left:6px solid #4338ca;padding:6px 12px;margin:34px 0 14px;color:#4338ca;font-size:1.35em;">4. 로그 읽기(압축 파일 포함)</h2>
+<pre style="background:#111827;color:#e5e7eb;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:13.5px;line-height:1.6;"><code>import gzip
+
+def open_log(path):
+    if path.endswith(&quot;.gz&quot;):
+        return gzip.open(path, &quot;rt&quot;, encoding=&quot;utf-8&quot;, errors=&quot;ignore&quot;)
+    return open(path, encoding=&quot;utf-8&quot;, errors=&quot;ignore&quot;)</code></pre>
+<p style="line-height:1.85;margin:0 0 14px;"><code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">errors="ignore"</code>는 깨진 문자가 섞인 줄 때문에 스크립트가 멈추지 않게 해 줍니다.</p>
+<h2 style="border-left:6px solid #4338ca;padding:6px 12px;margin:34px 0 14px;color:#4338ca;font-size:1.35em;">5. 집계 로직</h2>
+<pre style="background:#111827;color:#e5e7eb;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:13.5px;line-height:1.6;"><code>from collections import Counter, defaultdict
+
+fail_by_ip = Counter()
+fail_users = Counter()
+success = []          # (줄 앞부분 시각, user, ip, method)
+
+for path in paths:
+    with open_log(path) as f:
+        for line in f:
+            if m := FAILED.search(line):
+                fail_by_ip[m[&quot;ip&quot;]] += 1
+                fail_users[m[&quot;user&quot;]] += 1
+            elif m := ACCEPTED.search(line):
+                stamp = line[:15] if line[:3].isalpha() else line[:19]
+                success.append((stamp, m[&quot;user&quot;], m[&quot;ip&quot;], m[&quot;method&quot;]))</code></pre>
+<p style="line-height:1.85;margin:0 0 14px;"><code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">:=</code>(바다코끼리 연산자)는 Python 3.8부터 쓸 수 있습니다. <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">Counter</code>는 개수 세기 전용 딕셔너리라 <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">most_common()</code>으로 순위를 바로 뽑을 수 있습니다.</p>
+<h2 style="border-left:6px solid #4338ca;padding:6px 12px;margin:34px 0 14px;color:#4338ca;font-size:1.35em;">6. '실패 후 성공' 탐지</h2>
+<pre style="background:#111827;color:#e5e7eb;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:13.5px;line-height:1.6;"><code>THRESHOLD = 5
+suspicious = [s for s in success if fail_by_ip[s[2]] &gt;= THRESHOLD]</code></pre>
+<p style="line-height:1.85;margin:0 0 14px;">실패가 기준 이상 쌓인 IP에서 성공 기록이 있으면 비밀번호가 추측됐을 가능성이 있습니다. 단, 본인이 비밀번호를 몇 번 틀리고 접속한 경우도 걸리므로 경고 후 사람이 확인하는 용도로 쓰세요. 이 단순 버전은 실패와 성공의 시간 순서까지는 따지지 않습니다(연습 과제 참고).</p>
+<h2 style="border-left:6px solid #4338ca;padding:6px 12px;margin:34px 0 14px;color:#4338ca;font-size:1.35em;">7. 완성본</h2>
+<pre style="background:#111827;color:#e5e7eb;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:13.5px;line-height:1.6;"><code>#!/usr/bin/env python3
+&quot;&quot;&quot;학습용 SSH 인증 로그 분석기 - 본인이 관리하는 서버 로그에만 사용&quot;&quot;&quot;
+import argparse, csv, gzip, re
+from collections import Counter
+
+FAILED = re.compile(r&quot;Failed password for (?:invalid user )?(?P&lt;user&gt;\S+) from (?P&lt;ip&gt;[\d.:a-fA-F]+)&quot;)
+ACCEPTED = re.compile(r&quot;Accepted (?P&lt;method&gt;\S+) for (?P&lt;user&gt;\S+) from (?P&lt;ip&gt;[\d.:a-fA-F]+)&quot;)
+
+def open_log(path):
+    if path.endswith(&quot;.gz&quot;):
+        return gzip.open(path, &quot;rt&quot;, encoding=&quot;utf-8&quot;, errors=&quot;ignore&quot;)
+    return open(path, encoding=&quot;utf-8&quot;, errors=&quot;ignore&quot;)
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument(&quot;logs&quot;, nargs=&quot;+&quot;, help=&quot;예: /var/log/auth.log /var/log/auth.log.2.gz&quot;)
+    ap.add_argument(&quot;-n&quot;, &quot;--top&quot;, type=int, default=10)
+    ap.add_argument(&quot;--threshold&quot;, type=int, default=5)
+    ap.add_argument(&quot;--csv&quot;, help=&quot;IP별 실패 횟수를 저장할 CSV 경로&quot;)
+    args = ap.parse_args()
+
+    fail_by_ip, fail_users, success = Counter(), Counter(), []
+    for path in args.logs:
+        with open_log(path) as f:
+            for line in f:
+                if m := FAILED.search(line):
+                    fail_by_ip[m[&quot;ip&quot;]] += 1
+                    fail_users[m[&quot;user&quot;]] += 1
+                elif m := ACCEPTED.search(line):
+                    stamp = line[:15] if line[:3].isalpha() else line[:19]
+                    success.append((stamp, m[&quot;user&quot;], m[&quot;ip&quot;], m[&quot;method&quot;]))
+
+    print(f&quot;== 실패 총 {sum(fail_by_ip.values())}건, 고유 IP {len(fail_by_ip)}개 ==&quot;)
+    print(f&quot;\n[실패 IP 상위 {args.top}]&quot;)
+    for ip, n in fail_by_ip.most_common(args.top):
+        print(f&quot;  {n:&gt;6}  {ip}&quot;)
+    print(f&quot;\n[시도된 계정 상위 {args.top}]&quot;)
+    for user, n in fail_users.most_common(args.top):
+        print(f&quot;  {n:&gt;6}  {user}&quot;)
+    print(f&quot;\n[로그인 성공 {len(success)}건]&quot;)
+    for s in success[-args.top:]:
+        print(&quot;  &quot; + &quot;  &quot;.join(s))
+
+    suspicious = [s for s in success if fail_by_ip[s[2]] &gt;= args.threshold]
+    if suspicious:
+        print(f&quot;\n[!] 실패 {args.threshold}회 이상 IP에서의 성공 로그인 - 즉시 확인 필요&quot;)
+        for s in suspicious:
+            print(f&quot;  {s[0]}  user={s[1]}  ip={s[2]}  실패={fail_by_ip[s[2]]}&quot;)
+
+    if args.csv:
+        with open(args.csv, &quot;w&quot;, newline=&quot;&quot;, encoding=&quot;utf-8-sig&quot;) as f:
+            w = csv.writer(f)
+            w.writerow([&quot;ip&quot;, &quot;failed_count&quot;])
+            w.writerows(fail_by_ip.most_common())
+
+if __name__ == &quot;__main__&quot;:
+    main()</code></pre>
+<p style="line-height:1.85;margin:0 0 14px;">실행 예시:</p>
+<pre style="background:#111827;color:#e5e7eb;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:13.5px;line-height:1.6;"><code>sudo python3 sshlog.py /var/log/auth.log /var/log/auth.log.1 --csv fails.csv</code></pre>
+<p style="line-height:1.85;margin:0 0 14px;">CSV는 <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">utf-8-sig</code>로 저장해 엑셀에서 열어도 한글이 깨지지 않습니다.</p>
+<h2 style="border-left:6px solid #4338ca;padding:6px 12px;margin:34px 0 14px;color:#4338ca;font-size:1.35em;">8. 연습 과제와 정리</h2>
+<table style="border-collapse:collapse;width:100%;margin:14px 0;font-size:0.95em;"><tr><th style="background:#4338ca;color:#fff;border:1px solid #d1d5db;padding:8px 10px;text-align:left;">단계</th><th style="background:#4338ca;color:#fff;border:1px solid #d1d5db;padding:8px 10px;text-align:left;">과제</th></tr><tr><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">초급</td><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;"><code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">Connection closed ... [preauth]</code> 건수도 IP별로 세기</td></tr><tr><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">중급</td><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">시간대별(0~23시) 실패 건수 막대그래프를 텍스트로 출력</td></tr><tr><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">중급</td><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">실패 <strong>이후에</strong> 성공한 경우만 경고하도록 시간 순서 비교 추가</td></tr><tr><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">고급</td><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">결과를 매일 cron으로 실행하고 이전 날과 비교해 새 공격 IP만 알림</td></tr></table>
+<p style="line-height:1.85;margin:0 0 14px;">로그 형식은 배포판·sshd 버전·로깅 설정에 따라 다를 수 있습니다. 내 서버 로그 몇 줄을 먼저 확인하고 정규표현식을 맞춰 쓰세요. 공식 문서: docs.python.org의 re, collections, gzip 모듈.</p><div style="border-top:1px solid #e5e7eb;margin-top:36px;padding-top:14px;font-size:0.88em;color:#6b7280;line-height:1.7;">※ 이 글은 학습·방어 목적의 정리입니다. 점검·스캔은 반드시 본인 소유이거나 허가받은 시스템에서만 하세요. 도구 옵션과 수치는 버전·환경에 따라 다를 수 있으니 공식 문서에서 현행 내용을 확인해 주세요.</div></div>

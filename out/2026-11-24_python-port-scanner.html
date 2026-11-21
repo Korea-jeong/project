@@ -1,0 +1,113 @@
+<div style="font-size:16px;color:#1f2937;"><div style="background:linear-gradient(135deg,#4338ca,#4338cacc);color:#fff;border-radius:12px;padding:22px 24px;margin:0 0 24px;"><div style="font-size:0.85em;opacity:0.85;">SecurityMax Lab · 프로그래밍언어/Python</div><div style="font-size:1.4em;font-weight:700;margin-top:6px;line-height:1.4;">Python 보안 스크립트 ①: socket으로 만드는 간단한 포트 스캐너</div></div><p style="line-height:1.85;margin:0 0 14px;">어제 nmap으로 열린 포트를 확인해 봤다면, 오늘은 그 원리를 직접 코드로 구현해 봅니다. Python 표준 라이브러리만으로 50줄 남짓의 TCP 포트 스캐너를 만들고, 멀티스레드로 속도를 높이고, 결과를 저장하는 데까지 단계별로 진행합니다.</p>
+<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:12px 16px;margin:16px 0;line-height:1.8;">⚠️ 이 스크립트는 학습용입니다. 본인 PC(<code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">127.0.0.1</code>), 본인 공유기·NAS, 또는 허가받은 실습 환경에서만 실행하세요.</div>
+<h2 style="border-left:6px solid #4338ca;padding:6px 12px;margin:34px 0 14px;color:#4338ca;font-size:1.35em;">1. 원리: 연결이 되면 열린 포트</h2>
+<p style="line-height:1.85;margin:0 0 14px;">TCP 포트 스캐너의 핵심은 단순합니다. 대상 IP의 특정 포트로 접속(connect)을 시도해서</p>
+<ul style="line-height:1.85;margin:0 0 14px;padding-left:24px;"><li>연결 성공 → <strong>open</strong></li><li>연결 거부(RST) → <strong>closed</strong></li><li>시간 초과(응답 없음) → <strong>filtered</strong>(방화벽 등)</li></ul>
+<p style="line-height:1.85;margin:0 0 14px;">로 판단합니다. nmap의 <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">-sT</code>(TCP Connect 스캔)와 같은 방식입니다.</p>
+<h2 style="border-left:6px solid #4338ca;padding:6px 12px;margin:34px 0 14px;color:#4338ca;font-size:1.35em;">2. 준비물</h2>
+<ul style="line-height:1.85;margin:0 0 14px;padding-left:24px;"><li>Python 3.8 이상(설치 확인: <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">python3 --version</code>, Windows는 <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">python --version</code>)</li><li>외부 라이브러리 불필요: <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">socket</code>, <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">concurrent.futures</code>, <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">argparse</code>, <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">datetime</code>만 사용</li></ul>
+<h2 style="border-left:6px solid #4338ca;padding:6px 12px;margin:34px 0 14px;color:#4338ca;font-size:1.35em;">3. 가장 단순한 버전: 포트 하나 확인</h2>
+<pre style="background:#111827;color:#e5e7eb;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:13.5px;line-height:1.6;"><code>import socket
+
+def check_port(host, port, timeout=1.0):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        result = s.connect_ex((host, port))   # 0이면 연결 성공
+        return result == 0
+
+print(check_port(&quot;127.0.0.1&quot;, 22))</code></pre>
+<p style="line-height:1.85;margin:0 0 14px;"><code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">connect()</code>는 실패하면 예외를 던지지만 <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">connect_ex()</code>는 오류 코드를 숫자로 돌려줘서 반복문에서 쓰기 편합니다. <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">with</code> 문을 쓰면 소켓이 자동으로 닫힙니다.</p>
+<h2 style="border-left:6px solid #4338ca;padding:6px 12px;margin:34px 0 14px;color:#4338ca;font-size:1.35em;">4. 여러 포트를 순서대로 스캔</h2>
+<pre style="background:#111827;color:#e5e7eb;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:13.5px;line-height:1.6;"><code>for port in range(1, 1025):
+    if check_port(&quot;127.0.0.1&quot;, port, timeout=0.3):
+        print(f&quot;[OPEN] {port}&quot;)</code></pre>
+<p style="line-height:1.85;margin:0 0 14px;">동작은 하지만 느립니다. 닫힌 포트는 바로 응답이 오지만, 방화벽에 막힌 포트는 타임아웃까지 기다리기 때문입니다. 1,024개 포트 × 0.3초면 최악의 경우 5분이 넘습니다.</p>
+<h2 style="border-left:6px solid #4338ca;padding:6px 12px;margin:34px 0 14px;color:#4338ca;font-size:1.35em;">5. 멀티스레드로 빠르게</h2>
+<p style="line-height:1.85;margin:0 0 14px;">네트워크 대기 시간이 대부분이라 스레드를 여러 개 쓰면 크게 빨라집니다.</p>
+<pre style="background:#111827;color:#e5e7eb;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:13.5px;line-height:1.6;"><code>from concurrent.futures import ThreadPoolExecutor
+
+def scan(host, ports, workers=100, timeout=0.5):
+    open_ports = []
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        results = ex.map(lambda p: (p, check_port(host, p, timeout)), ports)
+        for port, is_open in results:
+            if is_open:
+                open_ports.append(port)
+    return sorted(open_ports)</code></pre>
+<div style="background:#4338ca0f;border-left:4px solid #4338ca;border-radius:6px;padding:12px 16px;margin:16px 0;line-height:1.8;">💡 스레드 수를 너무 크게 잡으면 내 PC나 공유기에 부담이 가고, 상대 장비의 보안 장비가 공격으로 판단할 수 있습니다. 학습용으로는 50~200 정도로 충분합니다.</div>
+<h2 style="border-left:6px solid #4338ca;padding:6px 12px;margin:34px 0 14px;color:#4338ca;font-size:1.35em;">6. 서비스 이름과 배너 확인</h2>
+<pre style="background:#111827;color:#e5e7eb;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:13.5px;line-height:1.6;"><code>def service_name(port):
+    try:
+        return socket.getservbyport(port, &quot;tcp&quot;)
+    except OSError:
+        return &quot;unknown&quot;
+
+def grab_banner(host, port, timeout=1.0):
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            return s.recv(100).decode(errors=&quot;ignore&quot;).strip()
+    except OSError:
+        return &quot;&quot;</code></pre>
+<p style="line-height:1.85;margin:0 0 14px;">SSH처럼 접속하자마자 자기소개 문자열(배너)을 보내는 서비스는 버전 정보가 보입니다. 이 정보가 바로 공격자가 취약 버전을 찾는 단서라서, 실무에서는 배너에 상세 버전을 숨기도록 설정하기도 합니다.</p>
+<h2 style="border-left:6px solid #4338ca;padding:6px 12px;margin:34px 0 14px;color:#4338ca;font-size:1.35em;">7. 완성본: 명령줄 옵션과 결과 저장</h2>
+<pre style="background:#111827;color:#e5e7eb;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:13.5px;line-height:1.6;"><code>#!/usr/bin/env python3
+&quot;&quot;&quot;학습용 TCP 포트 스캐너 - 본인/허가 대상에만 사용&quot;&quot;&quot;
+import argparse, socket, datetime
+from concurrent.futures import ThreadPoolExecutor
+
+def check_port(host, port, timeout):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        return port if s.connect_ex((host, port)) == 0 else None
+
+def service_name(port):
+    try:
+        return socket.getservbyport(port, &quot;tcp&quot;)
+    except OSError:
+        return &quot;unknown&quot;
+
+def parse_ports(spec):
+    ports = set()
+    for part in spec.split(&quot;,&quot;):
+        if &quot;-&quot; in part:
+            a, b = map(int, part.split(&quot;-&quot;))
+            ports.update(range(a, b + 1))
+        else:
+            ports.add(int(part))
+    return sorted(p for p in ports if 1 &lt;= p &lt;= 65535)
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument(&quot;host&quot;)
+    ap.add_argument(&quot;-p&quot;, &quot;--ports&quot;, default=&quot;1-1024&quot;)
+    ap.add_argument(&quot;-t&quot;, &quot;--threads&quot;, type=int, default=100)
+    ap.add_argument(&quot;--timeout&quot;, type=float, default=0.5)
+    ap.add_argument(&quot;-o&quot;, &quot;--output&quot;)
+    args = ap.parse_args()
+
+    ip = socket.gethostbyname(args.host)
+    ports = parse_ports(args.ports)
+    start = datetime.datetime.now()
+    print(f&quot;[*] {args.host} ({ip}) 포트 {len(ports)}개 스캔 시작: {start:%Y-%m-%d %H:%M:%S}&quot;)
+
+    with ThreadPoolExecutor(max_workers=args.threads) as ex:
+        found = [p for p in ex.map(lambda p: check_port(ip, p, args.timeout), ports) if p]
+
+    lines = [f&quot;{p}/tcp\topen\t{service_name(p)}&quot; for p in found]
+    print(&quot;\n&quot;.join(lines) if lines else &quot;[*] 열린 포트 없음&quot;)
+    print(f&quot;[*] 완료: {(datetime.datetime.now() - start).total_seconds():.1f}초&quot;)
+
+    if args.output:
+        with open(args.output, &quot;w&quot;, encoding=&quot;utf-8&quot;) as f:
+            f.write(&quot;\n&quot;.join(lines) + &quot;\n&quot;)
+
+if __name__ == &quot;__main__&quot;:
+    main()</code></pre>
+<p style="line-height:1.85;margin:0 0 14px;">실행 예시:</p>
+<pre style="background:#111827;color:#e5e7eb;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:13.5px;line-height:1.6;"><code>python3 portscan.py 127.0.0.1 -p 1-1024
+python3 portscan.py 192.168.0.1 -p 22,80,443,8080 -o router.txt</code></pre>
+<h2 style="border-left:6px solid #4338ca;padding:6px 12px;margin:34px 0 14px;color:#4338ca;font-size:1.35em;">8. 한계와 다음 단계</h2>
+<table style="border-collapse:collapse;width:100%;margin:14px 0;font-size:0.95em;"><tr><th style="background:#4338ca;color:#fff;border:1px solid #d1d5db;padding:8px 10px;text-align:left;">항목</th><th style="background:#4338ca;color:#fff;border:1px solid #d1d5db;padding:8px 10px;text-align:left;">이 스캐너</th><th style="background:#4338ca;color:#fff;border:1px solid #d1d5db;padding:8px 10px;text-align:left;">nmap</th></tr><tr><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">스캔 방식</td><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">TCP Connect만</td><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">SYN, UDP, 여러 방식</td></tr><tr><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">서비스 판별</td><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">포트 번호 기반 추정</td><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">응답 분석으로 버전 추정</td></tr><tr><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">속도 조절</td><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">스레드 수만</td><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">세밀한 타이밍 옵션</td></tr><tr><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">학습 가치</td><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">원리 이해에 좋음</td><td style="border:1px solid #d1d5db;padding:8px 10px;text-align:left;">실무 점검에 적합</td></tr></table>
+<p style="line-height:1.85;margin:0 0 14px;">연습 과제로 ① 결과를 CSV로 저장하기, ② 이전 결과와 비교해 새로 열린 포트만 알려 주기, ③ 배너 출력 옵션(<code style="background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:0.92em;">--banner</code>) 추가하기를 해 보세요. ②번은 "내 서버에 모르는 포트가 새로 열렸다"를 잡아내는 간단한 모니터링 도구가 됩니다.</p>
+<p style="line-height:1.85;margin:0 0 14px;">※ Python 버전에 따라 일부 동작이 다를 수 있으니 공식 문서(docs.python.org의 socket, concurrent.futures)를 함께 확인하세요.</p><div style="border-top:1px solid #e5e7eb;margin-top:36px;padding-top:14px;font-size:0.88em;color:#6b7280;line-height:1.7;">※ 이 글은 학습·방어 목적의 정리입니다. 점검·스캔은 반드시 본인 소유이거나 허가받은 시스템에서만 하세요. 도구 옵션과 수치는 버전·환경에 따라 다를 수 있으니 공식 문서에서 현행 내용을 확인해 주세요.</div></div>
